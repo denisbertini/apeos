@@ -60,8 +60,9 @@ the last two. Fill this table or the repo is a meme.
 ## Layout
 
 ```
-apeos_analyse.py       v2 core: MPI reads openPMD in place -> histograms
-                       (the pp-ana read path, step 2 deleted)
+apeos_particles.py     v2 core: transplanted pp-ana particle analysis
+                       (energy spectrum, divergence+FWHM, z-x energy
+                       map) reading openPMD directly -- no parquet
 spike/
   read_bench.py        raw mount-vs-scratch I/O characterisation (no openPMD)
   histogram_spike.py   dask momentum histogram from one series, timed
