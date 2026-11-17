@@ -58,10 +58,24 @@ the last two. Fill this table or the repo is a meme.
 ## Layout
 
 ```
+apeos_analyse.py       v2 core: MPI reads openPMD in place -> histograms
+                       (the pp-ana read path, step 2 deleted)
 spike/
   read_bench.py        raw mount-vs-scratch I/O characterisation (no openPMD)
   histogram_spike.py   dask momentum histogram from one series, timed
 ```
+
+## Donor lineage
+
+APEOS is the second life of
+[pp-ana](https://gitlab.gsi.de/d.bertini/pp-ana) (2024): pp-ana proved the
+parallel read/filter machinery but paid for it with a two-format
+workflow (openPMD in, split parquet out, analysis on the parquet).
+APEOS keeps the first half, deletes the second, and adds the part that
+matters in 2026: the input path may be a **leos-sealed Helios unit
+mounted from EOS** — the archive layout is untouched by the seal, and
+BP5's offset-indexed reads become range requests, so analysis runs on
+the archive without restore. *du déluge au ruisseau.*
 
 ## Roadmap (only if the table says go)
 
