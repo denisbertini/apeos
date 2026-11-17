@@ -26,6 +26,8 @@ format, no bulk copies.
 
 ## Why this shape
 
+Full design with cost model and mechanisms: [DESIGN.md](DESIGN.md).
+
 - **BP5 is range-read native**: the per-writer `.idx` maps every block to
   exact byte offsets of `data.*`, so a dask chunk is an `pread(offset,
   len)` — exactly what an object store answers well, and what HDF5-with-
