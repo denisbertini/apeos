@@ -10,9 +10,8 @@ home. EOS is the reservoir; APEOS is where the physics is drawn.*
 Post-processing for plasma runs that treats the archive as the
 computation site: an openPMD series (ADIOS2 BP5 / HDF5) sitting on
 POSIX-visible storage — Lustre scratch or the Helios EOS mount — is read
-through **openPMD-api's native dask bridge**, reduced chunk-by-chunk, and
-the pipeline's *only* output is a small results file. No intermediate
-format, no bulk copies.
+chunk-by-chunk, reduced on the fly, and the pipeline's *only* output is
+a small results file. No intermediate format, no bulk copies.
 
 ## Contract
 
@@ -20,8 +19,8 @@ format, no bulk copies.
 |---|---|
 | reads | openPMD series (BP5/HDF5) at any POSIX path: scratch or EOS mount |
 | writes | results only — histograms/tables, MB-scale, never bulk data |
-| parallelism | dask (processes); each chunk read = offset/length I/O = partial read on EOS |
-| physics I/O | openPMD-api `to_dask_array()` — first-party, no fork |
+| parallelism | rank-per-unit (mpi4py) or single process; every read is a chunk range = partial read on EOS |
+| physics I/O | openPMD-api chunk loads, component-level (position+momentum+weight) |
 | never | invent a second storage layer (the pp-ana lesson) |
 
 ## Why this shape
@@ -42,31 +41,54 @@ Full design with cost model and mechanisms: [DESIGN.md](DESIGN.md).
 
 ## The one number that decides everything
 
-openPMD-api speaks POSIX; Helios arrives through the EOS mount. The
-architecture stands or falls on **effective range-read throughput of
-the mount** (and on metadata-open latency, since a dask worker opens the
-series itself).
+openPMD-api speaks POSIX; Helios arrives either through the EOS mount or
+through ADIOS2's own remote-read path (native XRootD/HTTPS byte-range
+gets — the mount is not a requirement). The architecture stands or falls
+on **effective range-read throughput of the remote path** (and on
+metadata-open latency, since each worker opens the series itself).
 
-| quantity | scratch (Lustre) | EOS mount | verdict |
+| quantity | scratch (Lustre) | EOS remote | verdict |
 |---|---|---|---|
 | sequential read, GiB/s | _tbd_ | _tbd_ | |
 | random 4 MiB pread, GiB/s | _tbd_ | _tbd_ | |
 | series metadata open, ms | _tbd_ | _tbd_ | |
 | histogram end-to-end, GiB/s | _tbd_ | _tbd_ | |
 
-`spike/read_bench.py` measures the first two; `spike/histogram_spike.py`
-the last two. Fill this table or the repo is a meme.
+`spike/read_bench.py` measures the first two on POSIX paths (mount
+included); the native-protocol rows come from the ADIOS2 remote-read
+prototype. Fill this table or the repo is a meme.
 
 ## Layout
 
 ```
 apeos_particles.py     v2 core: transplanted pp-ana particle analysis
                        (energy spectrum, divergence+FWHM, z-x energy
-                       map) reading openPMD directly -- no parquet
+                       map) reading openPMD directly -- no parquet;
+                       mpi4py optional, runs on bare python 3.9
 spike/
   read_bench.py        raw mount-vs-scratch I/O characterisation (no openPMD)
-  histogram_spike.py   dask momentum histogram from one series, timed
 ```
+
+## Running on the compute nodes (bare python, no MPI on the host)
+
+The cluster's compute nodes expose python 3.9 with no `$HOME` and MPI
+only inside apptainer. apeos runs there without either: build one venv
+on Lustre (visible from every node), all wheels, nothing compiled:
+
+```bash
+VENV=/lustre/home/d.bertini/envs/apeos
+python3 -m venv $VENV && $VENV/bin/pip install -U pip
+$VENV/bin/pip install "numpy<2.1" "scipy<1.13" matplotlib openpmd-api
+# in the job (openpmd-api's wheel ships its own ADIOS2 with BP5 reader):
+$VENV/bin/python apeos_particles.py -d /lustre/runs/diag -o out/
+```
+
+Same interpreter version and path on login and compute nodes is the one
+requirement for a shared venv. `mpi4py` is a pure bonus: install it
+inside the apptainer image (built against that image's MPI) and the same
+script parallelizes with `mpirun` there; on the host it simply runs
+single-process. Standalone-CPython escape hatch if 3.9 wheels go away:
+unpack python-build-standalone on Lustre and venv from it.
 
 ## Donor lineage
 

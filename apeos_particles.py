@@ -13,6 +13,11 @@ actually uses are ever touched:
     mpirun -n 8 apeos_particles.py -d /eos/.../diag_run -o out/ [--plot]
     python3   apeos_particles.py -d /lustre/runs -f diag00000100.bp --edges pass
 
+MPI is optional: mpi4py absent (e.g. naked python 3.9 on cluster compute
+nodes, where MPI lives only inside apptainer) falls back to a single
+process over all units; identical outputs, since the MPI layer only
+sums local histograms.
+
 Energy convention matches pp-ana (total energy, MeV):
     E = m_e c^2 sqrt(1 + p_norm^2),  p_norm = |p| / (m_e c)
 Divergence = arctan2(p_perp, p_z), degrees; FWHM by the exact port of
@@ -26,11 +31,17 @@ unit, one pass, clip-tails approximation (flagged in the meta).
 import argparse
 import json
 import os
+import time
 from pathlib import Path
 
 import numpy as np
-from mpi4py import MPI
 import openpmd_api as io
+
+try:
+    from mpi4py import MPI
+    HAVE_MPI = True
+except ImportError:
+    HAVE_MPI = False
 
 ME_C = 9.1093837015e-31 * 299792458.0      # kg m / s
 ME_C2_MEV = 0.51099895069                   # electron rest energy, MeV
@@ -164,9 +175,36 @@ class Acc:
 
 
 def reduce_sum(comm, arr):
+    if not HAVE_MPI:
+        return arr.copy()
     out = np.zeros_like(arr)
     comm.Allreduce(arr, out, op=MPI.SUM)
     return out
+
+
+class SerialComm:
+    """No-MPI execution: the analysis is embarrassingly parallel (one
+    unit per worker, tiny reduction at the end), so a single process is
+    a valid run -- required on compute nodes that only expose MPI inside
+    apptainer. Same call shapes as COMM_WORLD for the few used here."""
+
+    def Get_size(self):
+        return 1
+
+    def Get_rank(self):
+        return 0
+
+    def Allreduce(self, sendbuf, recvbuf, op=None):
+        # single rank: the local value IS the reduced value. IN_PLACE
+        # (sendbuf is recvbuf) is already correct; copy otherwise.
+        if recvbuf is not sendbuf and sendbuf is not None:
+            recvbuf[...] = sendbuf
+
+    def reduce(self, value, op=None, root=0):
+        return value
+
+    def Abort(self, code):
+        raise SystemExit(code)
 
 
 def main():
@@ -184,7 +222,14 @@ def main():
     ap.add_argument("--plot", action="store_true")
     a = ap.parse_args()
 
-    comm = MPI.COMM_WORLD
+    if HAVE_MPI:
+        comm = MPI.COMM_WORLD
+        wtime, IN_PLACE = MPI.Wtime, MPI.IN_PLACE
+        MINOP, MAXOP = MPI.MIN, MPI.MAX
+    else:
+        comm = SerialComm()
+        wtime, IN_PLACE = time.perf_counter, None
+        MINOP, MAXOP = None, None
     size, rank = comm.Get_size(), comm.Get_rank()
     units = discover(a.dir, a.file)
     if not units:
@@ -195,16 +240,16 @@ def main():
     if rank == 0:
         os.makedirs(a.out, exist_ok=True)
 
-    t0 = MPI.Wtime()
+    t0 = wtime()
     t_open = 0.0
 
     # ---- pass 1: limits (pp-ana semantics; probe mode = head sampling) ----
     acc = Acc(a.bins, a.bins2d)
     readers = []
     for u in mine:
-        t = MPI.Wtime()
+        t = wtime()
         r = OpmdParticles(u, a.species)
-        t_open += MPI.Wtime() - t
+        t_open += wtime() - t
         readers.append((u, r))
         if a.edges == "probe":
             pos, mom, w = r.chunk(0, min(a.probe, r.n))
@@ -216,8 +261,8 @@ def main():
     for k, (lo, hi) in acc.lim.items():
         glo = np.array(lo if np.isfinite(lo) else -1.0)
         ghi = np.array(hi if np.isfinite(hi) else 1.0)
-        comm.Allreduce(MPI.IN_PLACE, glo, op=MPI.MIN)
-        comm.Allreduce(MPI.IN_PLACE, ghi, op=MPI.MAX)
+        comm.Allreduce(IN_PLACE, glo, op=MINOP)
+        comm.Allreduce(IN_PLACE, ghi, op=MAXOP)
         rng[k] = (float(glo[0]), float(ghi[0]))
     if a.edges == "probe":  # clip guard: probe range padded so tails survive
         for k in rng:
@@ -251,8 +296,9 @@ def main():
     hdy = reduce_sum(comm, hdy)
     h2E = reduce_sum(comm, h2E)
     h2n = reduce_sum(comm, h2n)
-    bytes_local = comm.reduce(sum(r.bytes_read for _, r in readers), op=MPI.SUM)
-    dt = MPI.Wtime() - t0
+    bytes_local = comm.reduce(sum(r.bytes_read for _, r in readers),
+                              op=(MPI.SUM if HAVE_MPI else None))
+    dt = wtime() - t0
 
     if rank == 0:
         if e2 is None:  # nothing streamed (empty selection): degenerate axes
