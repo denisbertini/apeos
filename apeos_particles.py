@@ -104,8 +104,11 @@ class OpmdParticles:
         self.bytes_read = 0
 
     def _load(self, var, start, count):
-        a = np.asarray(var.load_chunk([start], [count]))
+        # ORDER MATTERS: materialize AFTER flush -- load_chunk only hands
+        # out a view whose buffer is filled by the series flush.
+        view = var.load_chunk([start], [count])
         self.series.flush()
+        a = np.asarray(view)
         self.bytes_read += a.size * a.itemsize
         return a.astype(float, copy=False)
 
@@ -134,7 +137,10 @@ def discover(root, one_file):
     found = []
     for base, dirs, _ in os.walk(root):
         for d in dirs:
-            if d.endswith(".bp") and (d == one_file if one_file else True):
+            # WarpX/openPMD write openpmd_XXXXXX.bp5 -- ".bp5" does NOT
+            # end with ".bp"; matching only ".bp" found zero real units.
+            if (d.endswith(".bp5") or d.endswith(".bp")) \
+                    and (d == one_file if one_file else True):
                 found.append(os.path.join(base, d))
     if not one_file:
         found.sort(key=lambda p: int("".join(
@@ -217,6 +223,9 @@ def main():
     ap.add_argument("--bins2d", type=int, default=512)
     ap.add_argument("--chunk", type=int, default=1 << 20)
     ap.add_argument("--edges", choices=("pass", "probe"), default="pass")
+    ap.add_argument("--steps", default="all",
+                    help="all | comma list of iterations (chain tests "
+                         "run selected snapshots, not every unit)")
     ap.add_argument("--probe", type=int, default=1 << 20,
                     help="particles sampled per unit in probe mode")
     ap.add_argument("--plot", action="store_true")
@@ -232,9 +241,18 @@ def main():
         MINOP, MAXOP = None, None
     size, rank = comm.Get_size(), comm.Get_rank()
     units = discover(a.dir, a.file)
+    if a.steps != "all":
+        import re
+        # digits ONLY from the openpmd_XXXXXX stem: ".bp5" contributes a
+        # stray 5 to naive digit extraction (step 100 -> 1005!)
+        pat = re.compile(r"(?:openpmd_|diag_?)(\d{6,})")
+        want = {int(x) for x in a.steps.split(",") if x.strip()}
+        units = [u for u in units
+                 if (m := pat.search(os.path.basename(u))) and int(m.group(1)) in want]
     if not units:
         if rank == 0:
-            raise SystemExit(f"no .bp series under {a.dir}")
+            raise SystemExit(f"no .bp/.bp5 series under {a.dir} "
+                             f"for steps={a.steps}")
         comm.Abort(2)
     mine = units[rank::size]
     if rank == 0:
