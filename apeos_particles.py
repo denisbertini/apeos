@@ -37,6 +37,8 @@ from pathlib import Path
 import numpy as np
 import openpmd_api as io
 
+import apeos_eos
+
 try:
     from mpi4py import MPI
     HAVE_MPI = True
@@ -215,7 +217,9 @@ class SerialComm:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("-d", "--dir", required=True)
+    ap.add_argument("-d", "--dir", default=None,
+                    help="series root (or one unit); any POSIX store; "
+                         "omit with --eos-root for the EOS-direct leg")
     ap.add_argument("-f", "--file", default=None)
     ap.add_argument("-o", "--out", default="apeos_out")
     ap.add_argument("-s", "--species", default="electrons")
@@ -229,6 +233,7 @@ def main():
     ap.add_argument("--probe", type=int, default=1 << 20,
                     help="particles sampled per unit in probe mode")
     ap.add_argument("--plot", action="store_true")
+    apeos_eos.add_arguments(ap)
     a = ap.parse_args()
 
     if HAVE_MPI:
@@ -240,18 +245,30 @@ def main():
         wtime, IN_PLACE = time.perf_counter, None
         MINOP, MAXOP = None, None
     size, rank = comm.Get_size(), comm.Get_rank()
-    units = discover(a.dir, a.file)
-    if a.steps != "all":
-        import re
-        # digits ONLY from the openpmd_XXXXXX stem: ".bp5" contributes a
-        # stray 5 to naive digit extraction (step 100 -> 1005!)
-        pat = re.compile(r"(?:openpmd_|diag_?)(\d{6,})")
-        want = {int(x) for x in a.steps.split(",") if x.strip()}
-        units = [u for u in units
-                 if (m := pat.search(os.path.basename(u))) and int(m.group(1)) in want]
+    eos_leg, local = apeos_eos.resolver(a)
+    if eos_leg:
+        if a.steps == "all":
+            raise SystemExit("--eos-root: token-authenticated remote listing is "
+                             "impossible on Helios -- pass concrete --steps "
+                             "(e.g. --steps 0,50,100)")
+        units = [p for _, p in apeos_eos.units(
+            a.eos_root, [int(x) for x in a.steps.split(",") if x.strip()],
+            a.eos_host)]
+    else:
+        if not a.dir:
+            raise SystemExit("need -d DIR (POSIX store) or --eos-root EOSPATH")
+        units = discover(a.dir, a.file)
+        if a.steps != "all":
+            import re
+            # digits ONLY from the openpmd_XXXXXX stem: ".bp5" contributes a
+            # stray 5 to naive digit extraction (step 100 -> 1005!)
+            pat = re.compile(r"(?:openpmd_|diag_?)(\d{6,})")
+            want = {int(x) for x in a.steps.split(",") if x.strip()}
+            units = [u for u in units
+                     if (m := pat.search(os.path.basename(u))) and int(m.group(1)) in want]
     if not units:
         if rank == 0:
-            raise SystemExit(f"no .bp/.bp5 series under {a.dir} "
+            raise SystemExit(f"no .bp/.bp5 series under {a.dir or a.eos_root} "
                              f"for steps={a.steps}")
         comm.Abort(2)
     mine = units[rank::size]
@@ -266,7 +283,7 @@ def main():
     readers = []
     for u in mine:
         t = wtime()
-        r = OpmdParticles(u, a.species)
+        r = OpmdParticles(local(u), a.species)
         t_open += wtime() - t
         readers.append((u, r))
         if a.edges == "probe":
@@ -338,7 +355,7 @@ def main():
                  map_z_edges=e2[0], map_x_edges=e2[1],
                  map_mean_energy=mean_E, map_weight=h2n,
                  fwhm_divx=fw_x, fwhm_divy=fw_y)
-        meta = {"dir": a.dir, "species": a.species, "units": len(units),
+        meta = {"dir": a.dir or a.eos_root, "species": a.species, "units": len(units),
                 "ranks": size, "particles": int(n_tot), "edges_mode": a.edges,
                 "bytes_touched": int(bytes_local), "seconds": dt,
                 "open_seconds": t_open,

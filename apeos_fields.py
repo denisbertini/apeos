@@ -41,6 +41,8 @@ import time
 import numpy as np
 import openpmd_api as io
 
+import apeos_eos
+
 try:
     from mpi4py import MPI
     HAVE_MPI = True
@@ -226,25 +228,40 @@ class SerialComm:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("-d", "--dir", required=True,
-                    help="series root (or one unit); any POSIX store")
+    ap.add_argument("-d", "--dir", default=None,
+                    help="series root (or one unit); any POSIX store; "
+                         "omit with --eos-root for the EOS-direct leg")
     ap.add_argument("--steps", default="all", help="all | 0,50,100")
     ap.add_argument("--slices", default="", help="steps with plane maps")
     ap.add_argument("-o", "--out", default="apeos_fields")
     ap.add_argument("--plot", action="store_true")
+    apeos_eos.add_arguments(ap)
     a = ap.parse_args()
 
     comm = MPI.COMM_WORLD if HAVE_MPI else SerialComm()
     size, rank = comm.Get_size(), comm.Get_rank()
 
-    units = discover(a.dir)
-    if not units and os.path.basename(a.dir.rstrip("/")).endswith((".bp5", ".bp")):
-        units = discover(os.path.dirname(a.dir.rstrip("/")))
-    if a.steps != "all":
-        want = {int(x) for x in a.steps.split(",") if x.strip()}
-        units = [u for u in units if u[0] in want]
+    eos_leg, local = apeos_eos.resolver(a)
+    if eos_leg:
+        if a.steps == "all":
+            raise SystemExit("--eos-root: token-authenticated remote listing is "
+                             "impossible on Helios -- pass concrete --steps "
+                             "(e.g. --steps 0,50,100)")
+        units = apeos_eos.units(a.eos_root,
+                                 [int(x) for x in a.steps.split(",") if x.strip()],
+                                 a.eos_host)
+    else:
+        if not a.dir:
+            raise SystemExit("need -d DIR (POSIX store) or --eos-root EOSPATH")
+        units = discover(a.dir)
+        if not units and os.path.basename(a.dir.rstrip("/")).endswith((".bp5", ".bp")):
+            units = discover(os.path.dirname(a.dir.rstrip("/")))
+        if a.steps != "all":
+            want = {int(x) for x in a.steps.split(",") if x.strip()}
+            units = [u for u in units if u[0] in want]
     if not units:
-        raise SystemExit(f"no openpmd_*.bp5 units under {a.dir} for steps={a.steps}")
+        raise SystemExit(f"no openpmd_*.bp5 units under {a.dir or a.eos_root} "
+                         f"for steps={a.steps}")
     slice_steps = {int(x) for x in a.slices.split(",") if x.strip()}
 
     if rank == 0:
@@ -253,7 +270,7 @@ def main():
               f"slices at {sorted(slice_steps) or '-'}", flush=True)
 
     t0 = time.perf_counter()
-    mine = [unit_metrics(p, slice_steps) for _, p in units[rank::size]]
+    mine = [unit_metrics(local(p), slice_steps) for _, p in units[rank::size]]
     got = comm.gather(mine, root=0)
     dt = time.perf_counter() - t0
 
@@ -281,7 +298,7 @@ def main():
     np.savez(os.path.join(a.out, "apeos_fields.npz"), **npz)
 
     by = sum(r["bytes"] for r in res)
-    meta = {"tool": "fields", "dir": a.dir, "units_total": len(units),
+    meta = {"tool": "fields", "dir": a.dir or a.eos_root, "units_total": len(units),
             "ranks": size, "steps": [int(x) for x in steps],
             "bytes_touched": int(by), "seconds": dt,
             "rate_GiBs": (by / 2 ** 30) / dt if dt > 0 else 0,
