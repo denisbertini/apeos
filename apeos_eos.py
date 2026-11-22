@@ -39,7 +39,10 @@ def token(path=TOKEN_FILE):
             sys.exit(f"[eos] token {path} is {age / 3600:.1f} h old "
                      f"(TTL {TTL_S / 3600:.0f} h, margin {MARGIN_S / 60:.0f} min): "
                      "re-mint on lxbk0960:  eos token --path /eos/helios/Users/<user>/ "
-                     "--tree --expires $(( $(date +%s) + 8*3600 ))")
+                     "--tree --expires $(( $(date +%s) + 8*3600 )) | "
+                     "sed -n 's/.*\\(zteos64:[^ ]*\\).*/\\1/p' > "
+                     f"{path}   (charset trap: tokens contain '-' and '~'; "
+                     "grep-charset extraction truncates them)")
         tok = open(path).read().strip() or tok
     if not tok:
         sys.exit(f"[eos] no token: export EOSAUTHZ or mint into {path}")
@@ -80,11 +83,22 @@ def stage(unit_remote, work, host=HOST, tok=None, meta=None):
                      "'public access level restriction')")
     # Sidecar: host+path fused in `endpoint` is the double-slash-safe spelling
     # for ADIOS2 builds before 2cd0c1dda and remains valid after it.
+    # "threads"/"maxopenfiles" are engine defaults the fork's BP5Reader picks
+    # up from the sidecar (openPMD-api cannot forward them). Measured on GSI
+    # Helios (2026-11-21): opens are the currency -- every engine thread
+    # re-opens (nearly) every data file it touches, each paying the MGM token
+    # tax (~0.1 s). threads=1 with a handle window covering ALL data files
+    # opens each file exactly once (3-4x faster than the default window of 10,
+    # which silently re-opens on file revisits); threads>=8 degrade 4x. Scale
+    # with PROCESSES (mpirun ranks), not engine threads. Older libraries
+    # ignore these keys -- forward-safe.
     side = os.path.join(d, "s3.json")
     if not os.path.exists(side):
         with open(side, "w") as j:
             json.dump({"version": 1, "transport": "xrootd",
-                       "endpoint": f"{host}//{unit_remote.lstrip('/')}"}, j)
+                       "endpoint": f"{host}//{unit_remote.lstrip('/')}",
+                       "threads": os.environ.get("EOS_DATA_THREADS", "1"),
+                       "maxopenfiles": os.environ.get("EOS_DATA_MAXOPEN", "512")}, j)
     return d
 
 

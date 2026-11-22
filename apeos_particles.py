@@ -97,7 +97,10 @@ class OpmdParticles:
 
     def __init__(self, series_path, species):
         self.series = io.Series(series_path, io.Access.read_random_access)
-        keys = sorted(self.series.iterations.keys())
+        # container iteration yields keys in every openPMD-api >= 0.14;
+        # .keys() was removed from the python Iteration_Container in newer
+        # builds -- do not reintroduce it
+        keys = sorted(int(k) for k in self.series.iterations)
         self.it = self.series.iterations[keys[-1]]
         if species not in self.it.particles:
             raise KeyError(f"species {species!r} not in {list(self.it.particles)}")
