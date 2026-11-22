@@ -306,11 +306,18 @@ def main():
                 acc.feed(pos, mom, w)
     rng = {}
     for k, (lo, hi) in acc.lim.items():
-        glo = np.array(lo if np.isfinite(lo) else -1.0)
-        ghi = np.array(hi if np.isfinite(hi) else 1.0)
+        # 1-element 1-d buffers: np.array(scalar) is 0-d and indexing it
+        # with [0] after the Allreduce crashed; and +/-inf must survive the
+        # reduce as MIN/MAX neutrals -- substituting defaults BEFORE the
+        # reduce let unit-less ranks pollute the global range.
+        glo = np.array([lo], dtype=np.float64)
+        ghi = np.array([hi], dtype=np.float64)
         comm.Allreduce(IN_PLACE, glo, op=MINOP)
         comm.Allreduce(IN_PLACE, ghi, op=MAXOP)
-        rng[k] = (float(glo[0]), float(ghi[0]))
+        lo, hi = float(glo[0]), float(ghi[0])
+        if not np.isfinite(lo):  # genuinely no particles anywhere
+            lo, hi = -1.0, 1.0
+        rng[k] = (lo, hi)
     if a.edges == "probe":  # clip guard: probe range padded so tails survive
         for k in rng:
             lo, hi = rng[k]
