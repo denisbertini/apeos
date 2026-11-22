@@ -59,28 +59,52 @@ def units(eos_root, steps, host=HOST):
 
 def stage(unit_remote, work, host=HOST, tok=None, meta=None):
     """Materialize the small local view of a remote unit: metadata files +
-    s3.json sidecar. Idempotent; returns the local directory to open."""
+    s3.json sidecar. Returns the local directory to open.
+
+    RACE-SAFE BY CONSTRUCTION: every MPI rank calls this for every unit it
+    opens, all targeting the same staging directory.  At NP=16 that raced
+    (16 concurrent 'xrdcp -f' onto one md.0; readers opened truncated
+    metadata and ADIOS2 reported "truncated by an interrupted writer").
+    Protocol: each file downloads to a per-PID temp name and is published
+    with os.replace -- atomic on POSIX, so a reader sees only ever a
+    complete file -- and a completeness marker naming the file list is
+    published LAST.  Marker present and matching => every file complete;
+    otherwise the whole small set is (re)fetched, which also repairs any
+    corrupt leftover from an interrupted run.  Duplicated downloads across
+    racing ranks cost a few MB once per unit; a lock would cost a dead
+    rank's orphaned lockfile instead."""
     tok = tok or token()
     name = os.path.basename(unit_remote.rstrip("/"))
     d = os.path.join(work, name)
     os.makedirs(d, exist_ok=True)
-    for f in (os.environ.get("EOS_META_FILES", ",".join(meta or META_DEFAULT))
-              .split(",")):
-        dst = os.path.join(d, f)
-        if os.path.exists(dst):
-            continue
-        url = f"root://{host}//{unit_remote.lstrip('/')}/{f}?authz={tok}"
-        r = subprocess.run(["xrdcp", "-f", url, dst],
-                           stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-                           text=True)
-        if r.returncode != 0:
-            missing = any(k in r.stderr for k in
-                          ("could not stat", "No such file", "5003", "Unable"))
-            if missing and f not in META_REQUIRED:
-                continue        # layout without this metadata file: fine
-            sys.exit(f"[eos] staging {url.split('?')[0]} failed: "
-                     f"{r.stderr.strip()[:200]} (expired token answers "
-                     "'public access level restriction')")
+    files = (os.environ.get("EOS_META_FILES", ",".join(meta or META_DEFAULT))
+             .split(","))
+    done = os.path.join(d, ".apeos_staged")
+    try:                                   # marker content = staged file set
+        fresh = open(done).read().strip() == ",".join(files)
+    except OSError:
+        fresh = False
+    if not fresh:
+        for f in files:
+            dst = os.path.join(d, f)
+            tmp = f"{dst}.{os.getpid()}.tmp"
+            url = f"root://{host}//{unit_remote.lstrip('/')}/{f}?authz={tok}"
+            r = subprocess.run(["xrdcp", "-f", url, tmp],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                               text=True)
+            if r.returncode != 0:
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
+                missing = any(k in r.stderr for k in
+                              ("could not stat", "No such file", "5003", "Unable"))
+                if missing and f not in META_REQUIRED:
+                    continue    # layout without this metadata file: fine
+                sys.exit(f"[eos] staging {url.split('?')[0]} failed: "
+                         f"{r.stderr.strip()[:200]} (expired token answers "
+                         "'public access level restriction')")
+            os.replace(tmp, dst)           # atomic publish
     # Sidecar: host+path fused in `endpoint` is the double-slash-safe spelling
     # for ADIOS2 builds before 2cd0c1dda and remains valid after it.
     # "threads"/"maxopenfiles" are engine defaults the fork's BP5Reader picks
@@ -91,14 +115,21 @@ def stage(unit_remote, work, host=HOST, tok=None, meta=None):
     # opens each file exactly once (3-4x faster than the default window of 10,
     # which silently re-opens on file revisits); threads>=8 degrade 4x. Scale
     # with PROCESSES (mpirun ranks), not engine threads. Older libraries
-    # ignore these keys -- forward-safe.
+    # ignore these keys -- forward-safe.  Republished atomically every call
+    # so EOS_DATA_THREADS/EOS_DATA_MAXOPEN changes take effect on rerun.
     side = os.path.join(d, "s3.json")
-    if not os.path.exists(side):
-        with open(side, "w") as j:
-            json.dump({"version": 1, "transport": "xrootd",
-                       "endpoint": f"{host}//{unit_remote.lstrip('/')}",
-                       "threads": os.environ.get("EOS_DATA_THREADS", "1"),
-                       "maxopenfiles": os.environ.get("EOS_DATA_MAXOPEN", "512")}, j)
+    side_tmp = f"{side}.{os.getpid()}.tmp"
+    with open(side_tmp, "w") as j:
+        json.dump({"version": 1, "transport": "xrootd",
+                   "endpoint": f"{host}//{unit_remote.lstrip('/')}",
+                   "threads": os.environ.get("EOS_DATA_THREADS", "1"),
+                   "maxopenfiles": os.environ.get("EOS_DATA_MAXOPEN", "512")}, j)
+    os.replace(side_tmp, side)
+    if not fresh:                          # completeness marker LAST
+        done_tmp = f"{done}.{os.getpid()}.tmp"
+        with open(done_tmp, "w") as m:
+            m.write(",".join(files) + "\n")
+        os.replace(done_tmp, done)
     return d
 
 
