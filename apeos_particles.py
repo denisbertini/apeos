@@ -334,6 +334,8 @@ def main():
     e2 = None
     n_tot = 0
     for u, r in readers:
+        t_beat = wtime()
+        done = 0
         for pos, mom, w in r.stream(a.chunk):
             (h, _), (hx, _), (hy, _), (h2, hn, ed) = acc.hist(pos, mom, w, rng)
             hE += h
@@ -342,6 +344,13 @@ def main():
             h2E += h2
             h2n += hn
             e2 = ed
+            done += len(w)
+            # heartbeat: a silent multi-minute leg looks identical to a hang
+            if wtime() - t_beat > 10:
+                print(f"[particles r{rank}] {os.path.basename(u)}"
+                      f" {done/1e6:.0f}M/{r.n/1e6:.0f}M part"
+                      f" {r.bytes_read/2**30:.1f} GiB", flush=True)
+                t_beat = wtime()
             n_tot += pos.shape[0]
 
     # ---- reduce: the entire cross-rank traffic is these arrays ----
