@@ -141,9 +141,10 @@ class OpmdParticles:
         w = sp[self.wname]
         return pos, mom, self._load(w, start, count) * w.unit_SI
 
-    def stream(self, chunk):
-        for s in range(0, self.n, chunk):
-            yield self.chunk(s, min(chunk, self.n - s))
+    def stream(self, chunk, start=0, stop=None):
+        stop = self.n if stop is None else stop
+        for s in range(start, stop, chunk):
+            yield self.chunk(s, min(chunk, stop - s))
 
 
 # ---------------------------------------------------------------- driver
@@ -283,7 +284,16 @@ def main():
             raise SystemExit(f"no .bp/.bp5 series under {a.dir or a.eos_root} "
                              f"for steps={a.steps}")
         comm.Abort(2)
-    mine = units[rank::size]
+    # Work grid: assign by unit when units are plentiful, but when there are
+    # fewer units than ranks (single-snapshot analysis!) split each unit's
+    # particle range into `size` slices and hand out (unit, slice) pairs
+    # round-robin -- otherwise the leg degenerates to ONE stream and the
+    # rate table compares 8-way fields against 1-way particles, which
+    # penalizes EOS ~Nx (it scales near-linearly with processes).
+    if len(units) >= size:
+        work = [(u, 0, None) for u in units[rank::size]]
+    else:
+        work = [(u, k, size) for u in units for k in range(size)][rank::size]
     if rank == 0:
         os.makedirs(a.out, exist_ok=True)
 
@@ -293,16 +303,17 @@ def main():
     # ---- pass 1: limits (pp-ana semantics; probe mode = head sampling) ----
     acc = Acc(a.bins, a.bins2d)
     readers = []
-    for u in mine:
+    for u, k, R in work:
         t = wtime()
         r = OpmdParticles(local(u), a.species)
         t_open += wtime() - t
-        readers.append((u, r))
+        z0, z1 = (0, r.n) if R is None else (k * r.n // R, (k + 1) * r.n // R)
+        readers.append((u, r, z0, z1))
         if a.edges == "probe":
-            pos, mom, w = r.chunk(0, min(a.probe, r.n))
+            pos, mom, w = r.chunk(z0, min(a.probe, z1 - z0))
             acc.feed(pos, mom, w)
         else:
-            for pos, mom, w in r.stream(a.chunk):
+            for pos, mom, w in r.stream(a.chunk, z0, z1):
                 acc.feed(pos, mom, w)
     rng = {}
     for k, (lo, hi) in acc.lim.items():
@@ -333,10 +344,10 @@ def main():
     h2n = np.zeros((a.bins2d, a.bins2d))
     e2 = None
     n_tot = 0
-    for u, r in readers:
+    for u, r, z0, z1 in readers:
         t_beat = wtime()
         done = 0
-        for pos, mom, w in r.stream(a.chunk):
+        for pos, mom, w in r.stream(a.chunk, z0, z1):
             (h, _), (hx, _), (hy, _), (h2, hn, ed) = acc.hist(pos, mom, w, rng)
             hE += h
             hdx += hx
@@ -348,8 +359,9 @@ def main():
             # heartbeat: a silent multi-minute leg looks identical to a hang
             if wtime() - t_beat > 10:
                 print(f"[particles r{rank}] {os.path.basename(u)}"
-                      f" {done/1e6:.0f}M/{r.n/1e6:.0f}M part"
-                      f" {r.bytes_read/2**30:.1f} GiB", flush=True)
+                      f" slice[{z0/1e6:.0f}M,{z1/1e6:.0f}M):"
+                      f" {done/1e6:.0f}M part {r.bytes_read/2**30:.1f} GiB",
+                      flush=True)
                 t_beat = wtime()
             n_tot += pos.shape[0]
 
@@ -359,10 +371,12 @@ def main():
     hdy = reduce_sum(comm, hdy)
     h2E = reduce_sum(comm, h2E)
     h2n = reduce_sum(comm, h2n)
-    bytes_local = comm.reduce(sum(r.bytes_read for _, r in readers),
+    bytes_local = comm.reduce(sum(r.bytes_read for _, r, _, _ in readers),
                               op=(MPI.SUM if HAVE_MPI else None))
-    n_weighted = comm.reduce(sum(int(r.weighted) for _, r in readers),
+    n_items = comm.reduce(len(readers), op=(MPI.SUM if HAVE_MPI else None))
+    n_weighted = comm.reduce(sum(int(r.weighted) for _, r, _, _ in readers),
                              op=(MPI.SUM if HAVE_MPI else None))
+    n_tot = comm.reduce(n_tot, op=(MPI.SUM if HAVE_MPI else None))
     dt = wtime() - t0
 
     if rank == 0:
@@ -386,7 +400,7 @@ def main():
                  map_mean_energy=mean_E, map_weight=h2n,
                  fwhm_divx=fw_x, fwhm_divy=fw_y)
         meta = {"dir": a.dir or a.eos_root, "species": a.species, "units": len(units),
-                "weighted": n_weighted == len(units),
+                "weighted": n_weighted == n_items,
                 "ranks": size, "particles": int(n_tot), "edges_mode": a.edges,
                 "bytes_touched": int(bytes_local), "seconds": dt,
                 "open_seconds": t_open,
