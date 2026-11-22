@@ -187,11 +187,11 @@ class Acc:
         hE, eE = np.histogram(E, bins=self.bins, range=rng["E"], weights=w)
         hdx, edx = np.histogram(divx, bins=self.bins, range=rng["divx"], weights=w)
         hdy, edy = np.histogram(divy, bins=self.bins, range=rng["divy"], weights=w)
-        h2E, e2 = np.histogram2d(pos[:, 2], pos[:, 0], bins=self.bins2d,
-                                 range=[rng["z"], rng["x"]], weights=w * E)
+        h2E, ez2, ex2 = np.histogram2d(pos[:, 2], pos[:, 0], bins=self.bins2d,
+                                       range=[rng["z"], rng["x"]], weights=w * E)
         h2n, _, _ = np.histogram2d(pos[:, 2], pos[:, 0], bins=self.bins2d,
                                    range=[rng["z"], rng["x"]], weights=w)
-        return (hE, eE), (hdx, edx), (hdy, edy), (h2E, h2n, e2)
+        return (hE, eE), (hdx, edx), (hdy, edy), (h2E, h2n, (ez2, ex2))
 
 
 def reduce_sum(comm, arr):
