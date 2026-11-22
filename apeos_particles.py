@@ -105,6 +105,13 @@ class OpmdParticles:
         if species not in self.it.particles:
             raise KeyError(f"species {species!r} not in {list(self.it.particles)}")
         self.sp = self.it.particles[species]
+        # WarpX writes the openPMD base-standard name "weighting"; pp-ana's
+        # historical "weight" spelling kept for other frontends.
+        self.wname = next((n for n in ("weighting", "weight") if n in self.sp), None)
+        self.weighted = self.wname is not None
+        if not self.weighted:
+            print(f"[particles] WARNING: no weighting record in {series_path}"
+                  f" -- unit weights assumed", flush=True)
         self.n = int(self.sp["position"]["x"].shape[0])
         self.bytes_read = 0
 
@@ -129,7 +136,9 @@ class OpmdParticles:
         for i, c in enumerate("xyz"):
             v = sp["momentum"][c]
             mom[:, i] = self._load(v, start, count) * v.unit_SI
-        w = sp["weight"]
+        if self.wname is None:
+            return pos, mom, np.ones(count)
+        w = sp[self.wname]
         return pos, mom, self._load(w, start, count) * w.unit_SI
 
     def stream(self, chunk):
@@ -336,6 +345,8 @@ def main():
     h2n = reduce_sum(comm, h2n)
     bytes_local = comm.reduce(sum(r.bytes_read for _, r in readers),
                               op=(MPI.SUM if HAVE_MPI else None))
+    n_weighted = comm.reduce(sum(int(r.weighted) for _, r in readers),
+                             op=(MPI.SUM if HAVE_MPI else None))
     dt = wtime() - t0
 
     if rank == 0:
@@ -359,6 +370,7 @@ def main():
                  map_mean_energy=mean_E, map_weight=h2n,
                  fwhm_divx=fw_x, fwhm_divy=fw_y)
         meta = {"dir": a.dir or a.eos_root, "species": a.species, "units": len(units),
+                "weighted": n_weighted == len(units),
                 "ranks": size, "particles": int(n_tot), "edges_mode": a.edges,
                 "bytes_touched": int(bytes_local), "seconds": dt,
                 "open_seconds": t_open,
