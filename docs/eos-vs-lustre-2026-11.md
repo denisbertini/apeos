@@ -1,11 +1,16 @@
 # Reading sealed WarpX data from Helios EOS, directly — measured 2026-11-22
 
-**Verdict: the EOS-direct read path is production-ready. For scan-once
-analyses, `leos restore` is no longer a workflow step — it is an optional
-cache tier for interactive development. At 32 reader processes a
-full-scale particle analysis reads directly from Helios within 3% of
-Lustre speeds (2.75 vs 2.84 GiB/s, 162 GiB, bit-identical results),
-having restored nothing.**
+**Bottom line (author's sentence, quoted verbatim):**
+
+> *"EOS direct access is nearly competitive with Lustre. Lustre scratch
+> earns its place because, for certain access patterns, kernel page-cache
+> hits beat any XRootD protocol round-trip."*
+
+The rest of this report is the evidence behind that sentence: direct
+reads are bit-identical, large contiguous reads run at parity
+(x0.97 at 32 ranks), fragmented small reads lose x6-8 to per-request
+protocol cost -- so the winner is decided by requests-per-GiB, and
+`leos restore` is demoted from mandatory step to dev-loop convenience.
 
 Everything below was measured with `run_physics_chain.sh`: the same
 analysis code (lineouts, plane maps, energy spectra, divergence) run
@@ -88,9 +93,11 @@ scratch. It saves read time only on repeated passes:
 | ions | ~4-8 s | ~100+ full passes |
 | fields (fragmented small reads) | ~14 s | ~65 full passes |
 
-**Rule of thumb: default to EOS-direct. Restore only when you will
-re-run fragmented small-read queries tens of times on the same unit
-(developing an analysis, iterating on selection windows).**
+**Rule of thumb: default to EOS-direct for scan-once bulk analyses.
+Restore to scratch when (a) you will re-run fragmented small-read
+queries tens of times on the same unit (dev loop, and the page cache
+wins per the bottom line), or (b) shared data that many colleagues will
+read repeatedly -- the restore is paid once, everyone else reads warm.**
 
 ## 4. Regime constants (same unit, same day; `perf_probe.py`)
 
