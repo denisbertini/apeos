@@ -28,6 +28,7 @@ a small results file. No intermediate format, no bulk copies.
 Full design with cost model and mechanisms: [DESIGN.md](DESIGN.md).
 Measured Lustre-vs-EOS-direct verdict and rates (2026-11-22):
 [docs/eos-vs-lustre-2026-11.md](docs/eos-vs-lustre-2026-11.md).
+For the storage/EOS team: [docs/message-to-eos-team.md](docs/message-to-eos-team.md).
 
 - **BP5 is range-read native**: the per-writer `.idx` maps every block to
   exact byte offsets of `data.*`, so a dask chunk is an `pread(offset,
