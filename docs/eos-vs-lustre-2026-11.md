@@ -48,6 +48,21 @@ lossless end to end.
 \* warm page cache; honest cold single-stream Lustre reference: 0.72
 GiB/s (separate probe, clean node).
 
+**Scaling, NP=8 -> NP=16 (re-run 2026-11-22, same unit, integrity still
+0.000e+00 -- now also verifying that 16-way particle-slice partitioning
+sums deterministically on both stores):**
+
+| workload | Lustre 8->16 | EOS 8->16 | EOS/L at 16 |
+|---|---|---|---|
+| electrons (161 GiB) | 1.15 -> **2.21** (x1.92, near-linear) | 1.15 -> **1.58** (x1.37, first sublinearity) | **x0.71** |
+| ions (21 GiB) | 1.17 -> 2.28 | 0.80 -> 1.32 | x0.58 |
+| fields (fragmented) | ~0.9 | 0.15 -> 0.13 (does not scale: more ranks, smaller requests, RTT-bound) | x0.14 |
+
+Lustre's high-N edge is the page cache doing OST-parallel work; the EOS
+plateau at ~1.6 GiB/s (~13 Gb/s aggregate) is either imperfect TCP
+packing on a 25 GbE NIC or FST contention -- NP=32 or a second node
+will tell. Neither is fixed inside the reader.
+
 The three speedups are one mechanism read at three granularities: each
 EOS request pays a network round-trip (~1-3 ms, ~30-130 ms first open
 per file); multi-MB contiguous requests amortize it to nothing
@@ -62,7 +77,8 @@ scratch. It saves read time only on repeated passes:
 
 | workload | time saved per pass by having it on Lustre | break-even N |
 |---|---|---|
-| electrons (contiguous, full species) | 0 s | **never** |
+| electrons (contiguous, full species), NP=8 | 0 s | **never** |
+| electrons, NP=16 | ~30 s | ~55 full passes (whole-unit restore ~1650 s) |
 | ions | ~8 s | ~77 full passes |
 | fields (fragmented small reads) | ~10 s | ~65 full passes |
 
@@ -127,6 +143,8 @@ srun -l -N1 -n1 --partition=long --mem=32G --time=01:00:00 \
   python3 perf_probe.py "$LU" sweep lustre 1 0
 ```
 
-Artifacts of the run quoted above: `/lustre/rz/dbertini/apeos/chain_out_full/`.
-Code: apeos `c4ecd5b` (harness bypasses the image's Slurm-aware mpirun);
-ADIOS2 fork `c6c3cf97f`; measurements predate the VectorRead project.
+Artifacts of the runs quoted above: `/lustre/rz/dbertini/apeos/chain_out_full/`
+(NP=8) and `chain_out_np16/` (NP=16).
+Code: apeos `2ec9fe6` (race-safe multi-rank metadata staging; harness
+bypasses the image's Slurm-aware mpirun); ADIOS2 fork `c6c3cf97f`;
+measurements predate the VectorRead project.
