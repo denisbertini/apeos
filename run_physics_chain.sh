@@ -81,14 +81,30 @@ mkdir -p $OUT
 
 # one leg: single Slurm task, containerized OpenMPI gives NP parallel read
 # streams (rank<->unit mapping inside the analyzers; MPI-optional fallback
-# still correct at NP=1)
+# still correct at NP=1).
+#
+# NOTE on the launcher: this image ships a wrapper `mpirun` (a sh script in
+# /usr/local/bin) that re-executes the launch through `srun` whenever Slurm
+# variables are in the environment.  srun does not exist INSIDE the
+# container, so every leg used to print "sh: line 1: srun: command not
+# found" before the wrapper fell back to a direct launch (which worked: 8
+# real ranks via prterun).  We now pick the first candidate launcher that
+# is not itself an srun-reexec wrapper; the wrapper remains last resort.
 leg() { # leg <tool-script> <out-subdir> <store-selector args...>
   local script=$1 out=$2; shift 2
   srun -l -N1 -n1 -c "$NP" --partition="$PARTITION" --mem=16G \
        --job-name apeos-chain --time=04:00:00 \
-    apptainer exec "$CONT" \
-      mpirun --allow-run-as-root --oversubscribe -np "$NP" \
-        python3 -u "$HERE/$script" -o "$OUT/$out" "$@"
+    apptainer exec "$CONT" bash -c '
+      NP=$1; shift
+      LAUNCH=""
+      for c in mpirun.real /usr/bin/mpirun prterun orterun mpirun; do
+        p=$(command -v "$c" 2>/dev/null) || continue
+        grep -qsw srun "$p" 2>/dev/null && continue   # srun-reexec wrapper
+        LAUNCH=$p; break
+      done
+      [ -n "$LAUNCH" ] || { echo "leg: no MPI launcher found" >&2; exit 9; }
+      exec "$LAUNCH" --allow-run-as-root --oversubscribe -np "$NP" "$@"
+    ' leg "$NP" python3 -u "$HERE/$script" -o "$OUT/$out" "$@"
 }
 # store selector: POSIX root vs EOS-direct (steps mandatory: no remote listing)
 if [ -n "$EOS_ROOT" ]; then
