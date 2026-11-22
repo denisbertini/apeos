@@ -83,27 +83,31 @@ mkdir -p $OUT
 # streams (rank<->unit mapping inside the analyzers; MPI-optional fallback
 # still correct at NP=1).
 #
-# NOTE on the launcher: this image ships a wrapper `mpirun` (a sh script in
-# /usr/local/bin) that re-executes the launch through `srun` whenever Slurm
-# variables are in the environment.  srun does not exist INSIDE the
-# container, so every leg used to print "sh: line 1: srun: command not
-# found" before the wrapper fell back to a direct launch (which worked: 8
-# real ranks via prterun).  We now pick the first candidate launcher that
-# is not itself an srun-reexec wrapper; the wrapper remains last resort.
+# NOTE on "sh: line 1: srun: command not found": the container's OpenMPI 5
+# (prterun) has Slurm/PMIx scheduler awareness; seeing SLURM_JOB_ID in the
+# inherited environment it tries to stage the app launch through the `srun`
+# binary.  srun does not exist INSIDE the image, that attempt fails with
+# exactly this message, and OMPI then falls back to its normal local
+# launcher -- the app always ran 8-way regardless (confirmed by prterun
+# messages and per-rank tracebacks).  We cannot install slurm into the
+# image cheaply and must not let OMPI touch Slurm from inside anyway (the
+# allocation is already ours), so leg() strips SLURM_* from the launcher's
+# environment: OMPI then does a plain local launch, no srun attempt.
+# srun itself stays OUTSIDE apptainer exec, where Slurm intends it.
 leg() { # leg <tool-script> <out-subdir> <store-selector args...>
   local script=$1 out=$2; shift 2
   srun -l -N1 -n1 -c "$NP" --partition="$PARTITION" --mem=16G \
        --job-name apeos-chain --time=04:00:00 \
     apptainer exec "$CONT" bash -c '
       NP=$1; shift
+      for v in $(compgen -e | grep -E "^SLURM_"); do unset "$v"; done
       LAUNCH=""
-      for c in mpirun.real /usr/bin/mpirun prterun orterun mpirun; do
-        p=$(command -v "$c" 2>/dev/null) || continue
-        grep -qsw srun "$p" 2>/dev/null && continue   # srun-reexec wrapper
-        LAUNCH=$p; break
+      for c in mpirun prterun orterun; do
+        p=$(command -v "$c" 2>/dev/null) && { LAUNCH=$p; break; }
       done
       [ -n "$LAUNCH" ] || { echo "leg: no MPI launcher found" >&2; exit 9; }
-      exec "$LAUNCH" --allow-run-as-root --oversubscribe -np "$NP" "$@"
+      exec "$LAUNCH" --allow-run-as-root --map-by ":oversubscribe" \
+           -np "$NP" "$@"
     ' leg "$NP" python3 -u "$HERE/$script" -o "$OUT/$out" "$@"
 }
 # store selector: POSIX root vs EOS-direct (steps mandatory: no remote listing)
