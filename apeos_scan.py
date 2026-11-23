@@ -77,9 +77,10 @@ def unit_geometry(path):
         s.close()
         return 0.0, 0.0, 0.0
     r = ms[grp][list(ms[grp])[0]]
-    sp = np.asarray(r.grid_spacing, dtype=float) * r.grid_unit_SI
+    rec = ms[grp]      # grid metadata lives on the Record in openPMD >= 0.14
+    sp = np.asarray(rec.grid_spacing, dtype=float) * rec.grid_unit_SI
     shp = np.asarray(r.shape, dtype=float)
-    pos = np.asarray(r.position, dtype=float) * r.grid_unit_SI
+    pos = np.asarray(rec.position, dtype=float) * rec.grid_unit_SI
     s.close()
     # openPMD 3D cartesian component order (z, x, y) for WarpX diagnostics
     return float(sp[1] * shp[1] * sp[2] * shp[2]), float(pos[0]), float(sp[0] * shp[0])
@@ -153,7 +154,7 @@ def field_energy(path, a):
             s.flush()
             nb += arr.nbytes
             if dV is None:
-                sp = np.asarray(r.grid_spacing, dtype=float) * r.grid_unit_SI
+                sp = np.asarray(rec.grid_spacing, dtype=float) * rec.grid_unit_SI
                 dV = float(np.prod(sp))
             W += coef * float(np.sum(arr * arr)) * (dV or 0.0)
     s.close()
@@ -211,8 +212,7 @@ def main():
         m = re.search(r"(\d{6,})", os.path.basename(u))
         step = int(m.group(1)) if m else -1
         lp = local(u)
-        if geom is None:
-            geom = unit_geometry(lp)
+        geom = unit_geometry(lp)   # per unit: the domain must never be cached
         reader = OpmdParticles(lp, a.species)
         row = step_scalars(reader, a, geom)
         Wf = 0.0
