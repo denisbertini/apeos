@@ -35,7 +35,8 @@ EOS_ROOT=${EOS_ROOT:-}                   # EOS dir with openpmd_XXXXXX.bp5 (dire
 EOS_TOKEN_FILE=${EOS_TOKEN_FILE:-/lustre/rz/dbertini/io-tests/adios-tests/eos/helios.tok}
 STEPS=${STEPS:-100}                      # particle snapshot(s): full sweep per step
 SLICES=${SLICES:-0,50,100}               # plane-map steps (fields always: all steps)
-NP=${NP:-8}                              # MPI ranks in-container = read streams
+NP=${NP:-8}                              # total MPI ranks = read streams (Slurm tasks)
+NODES=${NODES:-1}                        # nodes for each leg; NP divisible by NODES
 PARTITION=${PARTITION:-long}
 OUT=${OUT:-chain_out}
 export APPTAINER_BINDPATH=${APPTAINER_BINDPATH:-/lustre/rz/dbertini/}
@@ -79,36 +80,23 @@ fi
 echo "=== particles: steps=$STEPS (both species)  |  slices=$SLICES  |  streams/store=$NP"
 mkdir -p $OUT
 
-# one leg: single Slurm task, containerized OpenMPI gives NP parallel read
-# streams (rank<->unit mapping inside the analyzers; MPI-optional fallback
-# still correct at NP=1).
-#
-# NOTE on "sh: line 1: srun: command not found": the container's OpenMPI 5
-# (prterun) has Slurm/PMIx scheduler awareness; seeing SLURM_JOB_ID in the
-# inherited environment it tries to stage the app launch through the `srun`
-# binary.  srun does not exist INSIDE the image, that attempt fails with
-# exactly this message, and OMPI then falls back to its normal local
-# launcher -- the app always ran 8-way regardless (confirmed by prterun
-# messages and per-rank tracebacks).  We cannot install slurm into the
-# image cheaply and must not let OMPI touch Slurm from inside anyway (the
-# allocation is already ours), so leg() strips SLURM_* from the launcher's
-# environment: OMPI then does a plain local launch, no srun attempt.
-# srun itself stays OUTSIDE apptainer exec, where Slurm intends it.
+# One leg = NP MPI ranks launched DIRECTLY by Slurm:
+#   srun -N $NODES -n $NP ... apptainer exec $CONT python3 tool.py
+# The container's OpenMPI bootstraps from Slurm's PMI/PMIx injection
+# (verified on this cluster 2026-11-23: ranks form COMM_WORLD of size NP
+# with no launcher inside the image), so there is deliberately NO
+# mpirun/prterun in the legs.  This is the production shape: one MPI
+# rank per Slurm task, scales across nodes, Slurm sees every rank
+# (sacct NTasks), and no oversubscribe/cosmetic-srun artifacts.
+# Scale knob: NP total ranks, NODES allocated (NP must be divisible).
 leg() { # leg <tool-script> <out-subdir> <store-selector args...>
   local script=$1 out=$2; shift 2
-  srun -l -N1 -n1 -c "$NP" --partition="$PARTITION" --mem=16G \
+  srun -l -N "$NODES" -n "$NP" \
+       --ntasks-per-node=$((NP / NODES)) \
+       --partition="$PARTITION" --mem=16G \
        --job-name apeos-chain --time=04:00:00 \
-    apptainer exec "$CONT" bash -c '
-      NP=$1; shift
-      for v in $(compgen -e | grep -E "^SLURM_"); do unset "$v"; done
-      LAUNCH=""
-      for c in mpirun prterun orterun; do
-        p=$(command -v "$c" 2>/dev/null) && { LAUNCH=$p; break; }
-      done
-      [ -n "$LAUNCH" ] || { echo "leg: no MPI launcher found" >&2; exit 9; }
-      exec "$LAUNCH" --allow-run-as-root --map-by ":oversubscribe" \
-           -np "$NP" "$@"
-    ' leg "$NP" python3 -u "$HERE/$script" -o "$OUT/$out" "$@"
+    apptainer exec "$CONT" \
+      python3 -u "$HERE/$script" -o "$OUT/$out" "$@"
 }
 # store selector: POSIX root vs EOS-direct (steps mandatory: no remote listing)
 if [ -n "$EOS_ROOT" ]; then
