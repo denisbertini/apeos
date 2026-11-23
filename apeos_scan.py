@@ -113,8 +113,12 @@ def step_scalars(reader, a, geom):
         if zlen > 0:
             zi = np.clip(((pos[:, 2] - z0) / zlen * a.zbins).astype(int),
                          0, a.zbins - 1)
-            np.add.at(SEz, zi, Ekin * w)
-            np.add.at(Wz, zi, w)
+            # np.bincount, NOT np.add.at: the latter is unbuffered and
+            # ~50-100x slower at this element count (it dominated the
+            # whole scan in the first campaign).  bincount accumulates
+            # in chunk order -> deterministic, bitwise-stable.
+            SEz += np.bincount(zi, weights=Ekin * w, minlength=a.zbins)
+            Wz += np.bincount(zi, weights=w, minlength=a.zbins)
     out = {"n": N}
     if W > 0:
         mean = S / W
