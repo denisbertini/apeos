@@ -21,7 +21,7 @@
 #   EOS_ROOT=/eos/helios/Users/<user>/warpx/diags ./run_physics_chain.sh    # direct
 #   ROOT_E=/mnt/eos_sealed/bp5_native              ./run_physics_chain.sh    # mount leg
 #   knobs: ROOT_L ROOT_E EOS_ROOT STEPS SLICES NP PARTITION SKIP_PARTICLES
-#          EOS_TOKEN_FILE
+#          EOS_TOKEN_FILE  SCAN=1 SCAN_STEPS=0,50,... SCAN_SPECIES="electrons"
 # EOS-direct notes: remote listing is impossible with a capability token, so
 # the EOS leg reuses the step list discovered under ROOT_L; the token must be
 # fresh (8 h TTL, 30 min margin enforced in apeos_eos.token).
@@ -133,6 +133,18 @@ if [ -z "${SKIP_PARTICLES:-}" ]; then
   done
 fi
 
+# ---------------- 2b) scan: per-step evolution (the production analysis
+# pattern: ONE pass over MANY steps -> scalar curves + fingerprint) -------
+SCAN=${SCAN:-} SCAN_STEPS=${SCAN_STEPS:-all}
+if [ -n "$SCAN" ]; then
+  for sp in ${SCAN_SPECIES:-electrons}; do
+    leg apeos_scan.py "scan_lustre_${sp}" -d "$ROOT_L" \
+        --steps "$SCAN_STEPS" -s "$sp"
+    leg apeos_scan.py "scan_eos_${sp}" "${EOS_SEL[@]}" \
+        --steps "$([ "$SCAN_STEPS" = all ] && echo "$FIELDS_STEPS_E" || echo "$SCAN_STEPS")" -s "$sp"
+  done
+fi
+
 # ---------------- 3) adjudicate: integrity verdict + rate table ------------------
 apptainer exec "$CONT" python3 -u "$HERE/apeos_compare.py" \
     "$OUT/fields_lustre" "$OUT/fields_eos" --out-prefix "$OUT/chain_fields"
@@ -141,6 +153,12 @@ if [ -z "${SKIP_PARTICLES:-}" ]; then
     apptainer exec "$CONT" python3 -u "$HERE/apeos_compare.py" \
         "$OUT/particles_lustre_${sp}" "$OUT/particles_eos_${sp}" \
         --out-prefix "$OUT/chain_${sp}" || true   # integrity verdict kept per report; fields exit code decides the campaign
+  done
+fi
+if [ -n "$SCAN" ]; then
+  for sp in ${SCAN_SPECIES:-electrons}; do
+    apptainer exec "$CONT" python3 -u "$HERE/apeos_scan_compare.py" \
+        "$OUT/scan_lustre_${sp}" "$OUT/scan_eos_${sp}" || true
   done
 fi
 
