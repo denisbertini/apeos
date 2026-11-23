@@ -86,8 +86,11 @@ def unit_geometry(path):
     return float(sp[1] * shp[1] * sp[2] * shp[2]), float(pos[0]), float(sp[0] * shp[0])
 
 
-def step_scalars(reader, a, geom):
-    """One streaming particle pass -> weighted moments dict."""
+def step_scalars(reader, a, geom, tag=""):
+    """One streaming particle pass -> weighted moments dict.
+    tag != "" enables a heartbeat line every a.hb seconds INSIDE the
+    unit: a 30 GiB unit on cold storage is minutes of silence otherwise,
+    and "is it alive or stalled" must never be a guess."""
     area, z0, zlen = geom
     W = S = S2 = 0.0
     N = 0
@@ -95,6 +98,8 @@ def step_scalars(reader, a, geom):
     Dx = Dy = Dxx = Dyy = 0.0
     SEz = np.zeros(a.zbins)
     Wz = np.zeros(a.zbins)
+    t_start = time.perf_counter()
+    t_last = t_start
     for pos, mom, w in reader.stream(a.chunk):
         Ekin = energy_mev(mom[:, 0], mom[:, 1], mom[:, 2]) - ME_C2_MEV
         W += float(np.sum(w))
@@ -119,6 +124,13 @@ def step_scalars(reader, a, geom):
             # in chunk order -> deterministic, bitwise-stable.
             SEz += np.bincount(zi, weights=Ekin * w, minlength=a.zbins)
             Wz += np.bincount(zi, weights=w, minlength=a.zbins)
+        if tag:
+            now = time.perf_counter()
+            if now - t_last >= a.hb:
+                print(f"{tag} particles: {N/1e6:7.1f}M read"
+                      f"  {reader.bytes_read/2**30:6.2f} GiB"
+                      f"  [{now - t_start:5.0f} s]", flush=True)
+                t_last = now
     out = {"n": N}
     if W > 0:
         mean = S / W
@@ -138,8 +150,14 @@ def step_scalars(reader, a, geom):
     return out
 
 
-def field_energy(path, a):
-    """EM field energy [J] + bytes touched (full E,B pass for the step)."""
+def field_energy(path, a, tag=""):
+    """EM field energy [J] + bytes touched (full E,B pass for the step).
+
+    openPMD >= 0.14 python bindings: meshes["E"] is the Record (holds
+    grid_spacing/position), meshes["E"]["x"] is ALREADY the
+    Record_Component (holds shape + data).  Iterating a Record_Component
+    yields data rows, so rec[list(rec)[0]] on one is a TypeError --
+    component access is direct, same drift family as unit_geometry."""
     s = io.Series(path, io.Access.read_only)
     it = s.iterations[list(s.iterations)[-1]]
     W = 0.0
@@ -148,11 +166,12 @@ def field_energy(path, a):
     for grp, coef in (("E", 0.5 * EPS0), ("B", 0.5 / MU0)):
         if grp not in it.meshes:
             continue
+        rec = it.meshes[grp]           # Record: grid metadata
         for c in ("x", "y", "z"):
-            if c not in it.meshes[grp]:
+            if c not in rec:
                 continue
-            rec = it.meshes[grp][c]
-            r = rec[list(rec)[0]]
+            t = time.perf_counter()
+            r = rec[c]                 # Record_Component: data
             arr = np.asarray(r[tuple(slice(0, n) for n in r.shape)],
                              dtype=np.float64)
             s.flush()
@@ -161,6 +180,9 @@ def field_energy(path, a):
                 sp = np.asarray(rec.grid_spacing, dtype=float) * rec.grid_unit_SI
                 dV = float(np.prod(sp))
             W += coef * float(np.sum(arr * arr)) * (dV or 0.0)
+            if tag:
+                print(f"{tag} field {grp}_{c}: {arr.size/1e6:.0f}M cells"
+                      f" [{time.perf_counter() - t:.1f} s]", flush=True)
     s.close()
     return W, nb
 
@@ -177,6 +199,9 @@ def main():
                     help="species charge in units of e (electrons: -1)")
     ap.add_argument("--no-fields", action="store_true",
                     help="skip the E,B pass (particle scalars only)")
+    ap.add_argument("--hb", type=float, default=30.0,
+                    help="heartbeat: print intra-unit progress every N "
+                         "seconds (0 = off)")
     apeos_eos.add_arguments(ap)
     a = ap.parse_args()
 
@@ -216,12 +241,13 @@ def main():
         m = re.search(r"(\d{6,})", os.path.basename(u))
         step = int(m.group(1)) if m else -1
         lp = local(u)
+        tag = f"[hb r{rank} step {step:6d}]" if a.hb > 0 else ""
         geom = unit_geometry(lp)   # per unit: the domain must never be cached
         reader = OpmdParticles(lp, a.species)
-        row = step_scalars(reader, a, geom)
+        row = step_scalars(reader, a, geom, tag)
         Wf = 0.0
         if not a.no_fields:
-            Wf, nb2 = field_energy(lp, a)
+            Wf, nb2 = field_energy(lp, a, tag)
             nbytes += nb2
         nbytes += reader.bytes_read
         row.update({"step": step, "species": a.species, "Wfield_J": Wf,
