@@ -265,8 +265,13 @@ def main():
     tot_wall = comm.reduce(round(wall, 3), op=(MPI.MAX if HAVE_MPI else None))
     tot = {"bytes_touched": tot_bytes, "seconds": tot_wall, "ranks": size}
 
+    # gather is COLLECTIVE: all ranks must call it (calling it only
+    # under `if rank == 0` deadlocks: rank 0 waits in gather while the
+    # others have left for MPI_Finalize -- observed as "all step lines
+    # printed, job never ends").  Only the writing is rank-0 work.
+    allrows = comm.gather(rows, root=0)
     if rank == 0:
-        allrows = [r for rr in comm.gather(rows, root=0) for r in rr]
+        allrows = [r for rr in allrows for r in rr]
         allrows.sort(key=lambda r: (r["step"], r["species"]))
         with open(os.path.join(a.out, "scan.json"), "w") as fh:
             for r in allrows:
