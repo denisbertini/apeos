@@ -89,22 +89,37 @@ opt-in cache tier, not a workflow step.
 
 ## What we found in the toolchain (with receipts)
 
-1. **Capability tokens do not authenticate metadata ops.** Read works,
-   stat fails (`XRootD applies authz to copy destinations only` — the eos
-   client's own words). Any backup/archiving tool needs stat through the
-   token to self-verify. *(Ask, already in the letter.)*
+1. **"Capability tokens do not authenticate metadata ops" — corrected
+   2026-11-24, and the correction is bigger than the bug.** Stat/list DO
+   work through a token when it rides the path operand as CGI
+   (`xrdfs <host> stat '<path>?authz=...'` → Path/Id/Size; `ls` lists a
+   whole archive). Session-level forms are dead on the Helios build
+   (`XrdSecsssENDORSEMENT`, `EOS_SESSION_TOKEN` both ignored for
+   metadata; upstream recommends EOS 5.4+/XRootD 5.6+ for those). The
+   original "broken" verdict was half our own client: `leos` sent
+   bare-path metadata RPCs, checked a `Status=OK` string real builds
+   never print, and parsed only lowercase `size`. Fixed and proven the
+   same day: `leos verify` on a 146 GiB archived unit — license
+   download + token-scoped listing + 12 size checks, `zteos64` token as
+   the only credential, `OK (remote verified)` (leos f78235b).
+   **Verified-before-free now works from any token-holding node.**
 2. **`eos cp` parallel-mkdir race**: on missing directories, 8 parallel
    copies race to create it and EEXIST losers die fatal (`errno=17`
    mislabeled). One-directory pre-creation was the field workaround.
 3. **Tool contribution, not just complaints**: we root-caused 2 + fixed it
    upstream in our archiver (`leos`, commit 26b397d: pre-create unit root,
    redact tokens from error text, classify EEXIST correctly; regression
-   test included). Static binary available; happy to hand over the patch.
+   test included; f78235b adds the token-carrying metadata RPCs from
+   finding 1 — 17 tests). Static binary available; happy to hand over the
+   patch.
 4. **Client provisioning is the pipeline's first bottleneck, not bandwidth.**
    2 of 20 cluster nodes can currently move data to EOS (eos client +
-   credential present); 18 of 20 can *compute on* it via container+token.
-   Concrete ask: eos client + credential bootstrap on the compute/main
-   partition — the multi-node ingest experiment needs it to exist.
+   credential present); 18 of 20 can *compute on* it via container+token —
+   and after finding 1, container + token is also enough to **archive and
+   verify** from any node. Revised ask (smaller than before): bless
+   container-based token ingest from compute nodes, schedule one announced
+   many-node capacity test, and ship `xrootd >= 5.x` client tools on the
+   compute image for comfort (no certificates, no `eos` console needed).
 
 ## Honesty ledger (so the numbers survive questioning)
 
